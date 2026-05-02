@@ -23,6 +23,12 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({ isOpen, children, cl
   const isDesktopApp = React.useMemo(() => isDesktopShell(), []);
   const isVSCode = React.useMemo(() => isVSCodeRuntime(), []);
   const isTabletStandalonePwa = useTabletStandalonePwaRuntime();
+  const isWindowsElectronDesktop = React.useMemo(() => {
+    if (typeof window === 'undefined') {
+      return false;
+    }
+    return Boolean(window.__OPENCHAMBER_ELECTRON__) && window.__OPENCHAMBER_PLATFORM__ === 'win32';
+  }, []);
   const [isResizing, setIsResizing] = React.useState(false);
   const startXRef = React.useRef(0);
   const startWidthRef = React.useRef(rightSidebarWidth || 420);
@@ -132,7 +138,7 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({ isOpen, children, cl
   }, [isDesktopApp]);
 
   const webWindowControlsOverlayStyle = React.useMemo<React.CSSProperties | undefined>(() => {
-    if (isDesktopApp || isVSCode) {
+    if ((isDesktopApp && !isWindowsElectronDesktop) || isVSCode) {
       return undefined;
     }
 
@@ -141,7 +147,7 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({ isOpen, children, cl
       paddingRight: 'calc(0.75rem + var(--oc-wco-right-inset, 0px))',
       ...(isTabletStandalonePwa ? { paddingTop: 'var(--oc-safe-area-top, 0px)' } : null),
     };
-  }, [isDesktopApp, isTabletStandalonePwa, isVSCode]);
+  }, [isDesktopApp, isTabletStandalonePwa, isVSCode, isWindowsElectronDesktop]);
 
   return (
     <aside

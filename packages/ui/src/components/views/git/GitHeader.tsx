@@ -257,6 +257,7 @@ export const GitHeader: React.FC<GitHeaderProps> = ({
     />
   );
 
+
   const identityControl = (
     <IdentityDropdown
       activeProfile={activeIdentityProfile}

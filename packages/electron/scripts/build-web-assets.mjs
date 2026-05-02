@@ -26,6 +26,11 @@ const resolveBun = () => {
   if (typeof process.env.BUN === 'string' && process.env.BUN.trim()) {
     return process.env.BUN.trim();
   }
+  if (process.platform === 'win32') {
+    const result = spawnSync('where', ['bun'], { encoding: 'utf8' });
+    const resolved = (result.stdout || '').trim().split('\n')[0];
+    return resolved || 'bun';
+  }
   const result = spawnSync('/bin/bash', ['-lc', 'command -v bun'], { encoding: 'utf8' });
   const resolved = (result.stdout || '').trim();
   return resolved || 'bun';

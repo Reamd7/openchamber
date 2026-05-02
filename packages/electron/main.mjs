@@ -700,12 +700,54 @@ const probeShellEnv = (shell, mode) => {
   return Object.keys(env).length > 0 ? env : null;
 };
 
+const queryWindowsRegistryValue = (key, name) => {
+  const result = spawnSync('reg.exe', ['query', key, '/v', name], {
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  if (result.error || result.status !== 0) return '';
+  const line = String(result.stdout || '')
+    .split(/\r?\n/)
+    .map((entry) => entry.trim())
+    .find((entry) => entry.toLowerCase().startsWith(name.toLowerCase()));
+  if (!line) return '';
+  const match = line.match(/^\S+\s+REG_\S+\s+(.+)$/);
+  return match?.[1]?.trim() || '';
+};
+
+const expandWindowsEnvRefs = (value) => String(value || '').replace(/%([^%]+)%/g, (_match, key) => process.env[key] || '');
+
+const loadWindowsEnv = () => {
+  const machinePath = queryWindowsRegistryValue('HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment', 'Path');
+  const userPath = queryWindowsRegistryValue('HKCU\\Environment', 'Path');
+  const homeDir = os.homedir();
+  const localAppData = process.env.LOCALAPPDATA || path.join(homeDir, 'AppData', 'Local');
+  const appData = process.env.APPDATA || path.join(homeDir, 'AppData', 'Roaming');
+  const commonPaths = [
+    path.join(homeDir, '.opencode', 'bin'),
+    path.join(homeDir, '.bun', 'bin'),
+    path.join(homeDir, '.local', 'bin'),
+    path.join(localAppData, 'Programs', 'Microsoft VS Code', 'bin'),
+    path.join(localAppData, 'Programs', 'Cursor', 'resources', 'app', 'bin'),
+    path.join(appData, 'npm'),
+  ];
+  return {
+    PATH: [machinePath, userPath, process.env.PATH, ...commonPaths]
+      .map(expandWindowsEnvRefs)
+      .filter(Boolean)
+      .join(path.delimiter),
+  };
+};
+
 // Finder-launched apps on macOS inherit a minimal PATH (no /opt/homebrew, mise, asdf, etc.).
 // Probe the user's login shell once so the sidecar sees the same PATH / tool env as `$SHELL -il`.
 const loadShellEnv = () => {
   if (shellEnvProbed) return cachedShellEnv;
   shellEnvProbed = true;
-  if (process.platform === 'win32') return null;
+  if (process.platform === 'win32') {
+    cachedShellEnv = loadWindowsEnv();
+    return cachedShellEnv;
+  }
   const shell = process.env.SHELL || '/bin/sh';
   if (isNushell(shell)) return null;
   cachedShellEnv = probeShellEnv(shell, '-il') || probeShellEnv(shell, '-l');
@@ -724,7 +766,8 @@ const inheritUserShellEnv = () => {
 
   const homeDir = os.homedir();
   const currentPath = process.env.PATH || '';
-  const currentPathLooksUserConfigured = pathLooksUserConfigured(currentPath, homeDir, ':');
+  const delimiter = process.platform === 'win32' ? ';' : ':';
+  const currentPathLooksUserConfigured = pathLooksUserConfigured(currentPath, homeDir, delimiter);
 
   for (const [key, value] of Object.entries(shellEnv)) {
     if (key === 'PATH') continue;
@@ -734,8 +777,8 @@ const inheritUserShellEnv = () => {
   }
 
   const shellPath = typeof shellEnv.PATH === 'string' ? shellEnv.PATH : '';
-  if (!currentPathLooksUserConfigured && shellPath) {
-    process.env.PATH = mergePathValues(shellPath, currentPath, ':');
+  if ((process.platform === 'win32' || !currentPathLooksUserConfigured) && shellPath) {
+    process.env.PATH = mergePathValues(shellPath, currentPath, delimiter);
   }
 };
 
@@ -995,6 +1038,15 @@ const emitToAllWindows = (event, detail) => {
   }
 };
 
+const setTaskbarProgress = (value) => {
+  if (process.platform !== 'win32') return;
+  for (const browserWindow of BrowserWindow.getAllWindows()) {
+    if (!browserWindow.isDestroyed()) {
+      browserWindow.setProgressBar(value);
+    }
+  }
+};
+
 const pendingDeepLinks = [];
 
 const parseDeepLink = (raw) => {
@@ -1142,6 +1194,7 @@ const createBrowserWindow = ({ label, restoreGeometry, url }) => {
   const desktopLocalOrigin = state.localOrigin || '';
   const desktopHome = os.homedir() || '';
   const desktopMacosMajor = String(macosMajorVersion());
+  const usesCustomTitleBar = process.platform === 'darwin' || process.platform === 'win32';
   const options = {
     title: 'OpenChamber',
     width: useSaved ? Math.max(saved.width, MIN_RESTORE_WINDOW_WIDTH) : 1280,
@@ -1153,7 +1206,14 @@ const createBrowserWindow = ({ label, restoreGeometry, url }) => {
     // Tauri used an overlay title bar with explicit traffic-light placement.
     // Electron's hiddenInset adds its own extra inset, which leaves the controls
     // visibly lower than the app header. Use a plain hidden title bar instead.
-    titleBarStyle: process.platform === 'darwin' ? 'hidden' : 'default',
+    titleBarStyle: usesCustomTitleBar ? 'hidden' : 'default',
+    titleBarOverlay: process.platform === 'win32'
+      ? {
+          color: nativeTheme.shouldUseDarkColors ? '#151313' : '#f5f5f4',
+          symbolColor: nativeTheme.shouldUseDarkColors ? '#fafaf9' : '#1c1917',
+          height: 48,
+        }
+      : undefined,
     trafficLightPosition: process.platform === 'darwin' ? { x: 16, y: 17 } : undefined,
     webPreferences: {
       additionalArguments: [
@@ -1580,6 +1640,9 @@ const setupAutoUpdater = () => {
   });
 
   autoUpdater.on('download-progress', (progress) => {
+    const total = Number(progress.total || 0);
+    const transferred = Number(progress.transferred || 0);
+    setTaskbarProgress(total > 0 ? Math.max(0, Math.min(1, transferred / total)) : 0.01);
     emitToAllWindows('openchamber:update-progress', mapUpdaterProgressEvent({
       event: 'Progress',
       data: {
@@ -1592,12 +1655,14 @@ const setupAutoUpdater = () => {
 
   autoUpdater.on('update-downloaded', (info) => {
     log.info(`[electron] update-downloaded version=${info?.version || 'unknown'}`);
+    setTaskbarProgress(-1);
     if (state.pendingUpdate) {
       state.pendingUpdate.downloaded = true;
     }
   });
 
   autoUpdater.on('error', (err) => {
+    setTaskbarProgress(-1);
     log.error('[electron] autoUpdater error', err);
   });
 };
@@ -1764,6 +1829,89 @@ const CLI_BY_APP_ID = {
   vscodium: 'codium',
   windsurf: 'windsurf',
   zed: 'zed',
+};
+
+const WINDOWS_CLI_BY_APP_ID = {
+  vscode: 'code.cmd',
+  cursor: 'cursor.cmd',
+  vscodium: 'codium.cmd',
+  windsurf: 'windsurf.cmd',
+  zed: 'zed.cmd',
+};
+
+const WINDOWS_APP_EXECUTABLES = {
+  terminal: ['wt.exe', 'WindowsTerminal.exe'],
+  vscode: ['code.cmd', 'code.exe'],
+  cursor: ['cursor.cmd', 'cursor.exe'],
+  vscodium: ['codium.cmd', 'codium.exe'],
+  windsurf: ['windsurf.cmd', 'windsurf.exe'],
+  zed: ['zed.exe'],
+  'visual-studio': ['devenv.exe'],
+  'sublime-text': ['subl.exe', 'sublime_text.exe'],
+};
+
+const runWhere = (program) => {
+  const result = spawnSync('where.exe', [program], { encoding: 'utf8', windowsHide: true });
+  if (result.error || result.status !== 0) return null;
+  const first = String(result.stdout || '').split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+  return first || null;
+};
+
+const findWindowsExecutable = (appId) => {
+  for (const program of WINDOWS_APP_EXECUTABLES[appId] || []) {
+    const resolved = runWhere(program);
+    if (resolved) return resolved;
+  }
+  return null;
+};
+
+const isWindowsAppInstalled = ({ appId, appName }) => {
+  if (appId === 'finder') return true;
+  if (appId === 'terminal') return Boolean(findWindowsExecutable('terminal'));
+  if (findWindowsExecutable(appId)) return true;
+  const program = `${appName}.exe`.replace(/\s+/g, '');
+  return Boolean(runWhere(program));
+};
+
+const buildWindowsOpenProjectSpecs = ({ projectPath, appId }) => {
+  if (appId === 'finder') {
+    return [{ program: 'explorer.exe', args: [projectPath] }];
+  }
+  if (appId === 'terminal') {
+    return [
+      { program: 'wt.exe', args: ['-d', projectPath] },
+      { program: 'powershell.exe', args: ['-NoExit', '-Command', `Set-Location -LiteralPath ${JSON.stringify(projectPath)}`] },
+    ];
+  }
+  const specs = [];
+  const cli = WINDOWS_CLI_BY_APP_ID[appId];
+  if (cli) {
+    specs.push({ program: cli, args: [projectPath] });
+  }
+  const exe = findWindowsExecutable(appId);
+  if (exe) {
+    specs.push({ program: exe, args: [projectPath] });
+  }
+  return specs;
+};
+
+const buildWindowsOpenFileSpecs = ({ filePath, appId }) => {
+  if (appId === 'finder') {
+    return [{ program: 'explorer.exe', args: ['/select,', filePath] }];
+  }
+  if (appId === 'terminal') {
+    return buildWindowsOpenProjectSpecs({ projectPath: path.dirname(filePath), appId });
+  }
+  const specs = [];
+  const cli = WINDOWS_CLI_BY_APP_ID[appId];
+  if (cli) {
+    specs.push({ program: cli, args: [filePath] });
+  }
+  const exe = findWindowsExecutable(appId);
+  if (exe) {
+    specs.push({ program: exe, args: [filePath] });
+  }
+  return specs;
 };
 
 const buildOpenProjectSpecs = ({ projectPath, appId, appName }) => {
@@ -2004,34 +2152,48 @@ const handleInvoke = async (browserWindow, command, args = {}) => {
     }
 
     case 'desktop_open_in_app': {
-      if (process.platform !== 'darwin') {
-        throw new Error('desktop_open_in_app is only supported on macOS');
-      }
       const projectPath = typeof args.projectPath === 'string' ? args.projectPath.trim() : '';
       const appId = typeof args.appId === 'string' ? args.appId.trim().toLowerCase() : '';
       const appName = typeof args.appName === 'string' ? args.appName.trim() : '';
       if (!projectPath || !appId || !appName) {
         throw new Error('Project path, app id, and app name are required');
       }
+      if (process.platform === 'win32') {
+        runSpecChain(buildWindowsOpenProjectSpecs({ projectPath, appId, appName }), appName);
+        return null;
+      }
+      if (process.platform !== 'darwin') {
+        throw new Error('desktop_open_in_app is only supported on macOS and Windows');
+      }
       runSpecChain(buildOpenProjectSpecs({ projectPath, appId, appName }), appName);
       return null;
     }
 
     case 'desktop_open_file_in_app': {
-      if (process.platform !== 'darwin') {
-        throw new Error('desktop_open_file_in_app is only supported on macOS');
-      }
       const filePath = typeof args.filePath === 'string' ? args.filePath.trim() : '';
       const appId = typeof args.appId === 'string' ? args.appId.trim().toLowerCase() : '';
       const appName = typeof args.appName === 'string' ? args.appName.trim() : '';
       if (!filePath || !appId || !appName) {
         throw new Error('File path, app id, and app name are required');
       }
+      if (process.platform === 'win32') {
+        runSpecChain(buildWindowsOpenFileSpecs({ filePath, appId, appName }), appName);
+        return null;
+      }
+      if (process.platform !== 'darwin') {
+        throw new Error('desktop_open_file_in_app is only supported on macOS and Windows');
+      }
       runSpecChain(buildOpenFileSpecs({ filePath, appId, appName }), appName);
       return null;
     }
 
     case 'desktop_filter_installed_apps': {
+      if (process.platform === 'win32') {
+        if (!Array.isArray(args.apps)) return [];
+        return args.apps
+          .map((appName) => String(appName || '').trim())
+          .filter((appName) => appName && isWindowsAppInstalled({ appId: '', appName }));
+      }
       if (process.platform !== 'darwin') {
         throw new Error('desktop_filter_installed_apps is only supported on macOS');
       }
@@ -2043,6 +2205,9 @@ const handleInvoke = async (browserWindow, command, args = {}) => {
     }
 
     case 'desktop_fetch_app_icons': {
+      if (process.platform === 'win32') {
+        return [];
+      }
       if (process.platform !== 'darwin') {
         throw new Error('desktop_fetch_app_icons is only supported on macOS');
       }
@@ -2058,9 +2223,6 @@ const handleInvoke = async (browserWindow, command, args = {}) => {
     }
 
     case 'desktop_get_installed_apps': {
-      if (process.platform !== 'darwin') {
-        throw new Error('desktop_get_installed_apps is only supported on macOS');
-      }
       const cachePath = buildInstalledAppsCachePath();
       const now = Math.floor(Date.now() / 1000);
       let cache = null;
@@ -2072,11 +2234,20 @@ const handleInvoke = async (browserWindow, command, args = {}) => {
       const hasCache = Boolean(cache);
       const isCacheStale = !cache || (now - Number(cache.updatedAt || 0)) > INSTALLED_APPS_CACHE_TTL_SECS;
       const refresh = async () => {
-        const apps = await buildInstalledApps(Array.isArray(args.apps) ? args.apps : []);
+        const apps = process.platform === 'win32'
+          ? (Array.isArray(args.apps) ? args.apps : [])
+              .map((appName) => String(appName || '').trim())
+              .filter(Boolean)
+              .filter((appName) => isWindowsAppInstalled({ appId: '', appName }))
+              .map((name) => ({ name, iconDataUrl: null }))
+          : await buildInstalledApps(Array.isArray(args.apps) ? args.apps : []);
         await fsp.mkdir(path.dirname(cachePath), { recursive: true });
         await fsp.writeFile(cachePath, JSON.stringify({ updatedAt: now, apps }, null, 2));
         emitToAllWindows('openchamber:installed-apps-updated', apps);
       };
+      if (process.platform !== 'darwin' && process.platform !== 'win32') {
+        throw new Error('desktop_get_installed_apps is only supported on macOS and Windows');
+      }
       if (!hasCache || isCacheStale || args.force === true) {
         void refresh();
       }
@@ -2124,6 +2295,14 @@ const handleInvoke = async (browserWindow, command, args = {}) => {
         nativeTheme.themeSource = 'dark';
       } else {
         nativeTheme.themeSource = 'system';
+      }
+      if (process.platform === 'win32' && browserWindow && !browserWindow.isDestroyed()) {
+        const useDark = nativeTheme.shouldUseDarkColors;
+        browserWindow.setTitleBarOverlay({
+          color: useDark ? '#151313' : '#f5f5f4',
+          symbolColor: useDark ? '#fafaf9' : '#1c1917',
+          height: 48,
+        });
       }
       return null;
     }
@@ -2180,6 +2359,7 @@ const handleInvoke = async (browserWindow, command, args = {}) => {
       if (!state.pendingUpdate) {
         throw new Error('No pending update');
       }
+      setTaskbarProgress(0.01);
       emitToAllWindows('openchamber:update-progress', mapUpdaterProgressEvent({
         event: 'Started',
         data: {
@@ -2209,6 +2389,7 @@ const handleInvoke = async (browserWindow, command, args = {}) => {
           Promise.resolve(autoUpdater.downloadUpdate()).catch((error) => finish(reject, error));
         });
       }
+      setTaskbarProgress(-1);
       emitToAllWindows('openchamber:update-progress', mapUpdaterProgressEvent({
         event: 'Finished',
         data: {},

@@ -38,7 +38,11 @@ const applyOverlayInsets = (
 
 export const useWindowControlsOverlayLayout = () => {
   React.useEffect(() => {
-    if (typeof window === 'undefined' || !isWebRuntime()) {
+    const isElectronDesktop = typeof window !== 'undefined'
+      && Boolean(window.__OPENCHAMBER_ELECTRON__)
+      && window.__OPENCHAMBER_PLATFORM__ === 'win32';
+
+    if (typeof window === 'undefined' || (!isWebRuntime() && !isElectronDesktop)) {
       return;
     }
 
