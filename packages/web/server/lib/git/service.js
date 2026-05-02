@@ -12,6 +12,8 @@ const execFileAsync = promisify(execFile);
 const gpgconfCandidates = ['gpgconf', '/opt/homebrew/bin/gpgconf', '/usr/local/bin/gpgconf'];
 let resolvedGitBinary = null;
 const worktreeBootstrapState = new Map();
+const SIMPLE_GIT_SAFE_BINARY_PATTERN = /^([a-z]:)?([a-z0-9/.\\_~-]+)$/i;
+const SIMPLE_GIT_UNSAFE_BINARY_WARNING = 'Invalid value supplied for custom binary, restricted characters must be removed';
 
 const WORKTREE_BOOTSTRAP_PENDING = 'pending';
 const WORKTREE_BOOTSTRAP_READY = 'ready';
@@ -85,6 +87,30 @@ const normalizeGitExecutableCandidate = (candidate) => {
   return trimmed;
 };
 
+const isSafeSimpleGitBinary = (candidate) => (
+  typeof candidate === 'string' && SIMPLE_GIT_SAFE_BINARY_PATTERN.test(candidate)
+);
+
+const createSimpleGit = (options) => {
+  if (!options?.unsafe?.allowUnsafeCustomBinary) {
+    return simpleGit(options);
+  }
+
+  const originalWarn = console.warn;
+  console.warn = (...args) => {
+    if (String(args[0] || '').includes(SIMPLE_GIT_UNSAFE_BINARY_WARNING)) {
+      return;
+    }
+    originalWarn(...args);
+  };
+
+  try {
+    return simpleGit(options);
+  } finally {
+    console.warn = originalWarn;
+  }
+};
+
 const listPathExecutableCandidates = (binaryName) => {
   const currentPath = process.env.PATH || '';
   const seen = new Set();
@@ -132,22 +158,34 @@ const resolveGitBinary = () => {
     .map((value) => (typeof value === 'string' ? value.trim() : ''))
     .filter(Boolean);
   for (const candidate of explicit) {
-    if (isExecutableFile(candidate)) {
-      resolvedGitBinary = candidate;
+    const normalized = normalizeGitExecutableCandidate(candidate);
+    if (isExecutableFile(normalized)) {
+      resolvedGitBinary = normalized;
       return resolvedGitBinary;
     }
   }
 
-  const discovered = [
+  const pathDiscovered = [
     ...listPathExecutableCandidates('git.exe'),
     ...listPathExecutableCandidates('git'),
+  ]
+    .map(normalizeGitExecutableCandidate)
+    .filter(Boolean)
+    .filter((candidate) => isExecutableFile(candidate));
+  if (pathDiscovered.length > 0) {
+    resolvedGitBinary = 'git';
+    return resolvedGitBinary;
+  }
+
+  const discovered = [
     ...listWindowsGitInstallCandidates(),
   ]
     .map(normalizeGitExecutableCandidate)
     .filter(Boolean)
     .filter((candidate) => isExecutableFile(candidate));
 
-  const preferredExe = discovered.find((candidate) => candidate.toLowerCase().endsWith('.exe'));
+  const preferredExe = discovered.find((candidate) => isSafeSimpleGitBinary(candidate) && candidate.toLowerCase().endsWith('.exe'))
+    || discovered.find((candidate) => candidate.toLowerCase().endsWith('.exe'));
   resolvedGitBinary = preferredExe || discovered[0] || 'git.exe';
   return resolvedGitBinary;
 };
@@ -275,9 +313,9 @@ const createGit = async (directory) => {
   const hasCustomBinary = typeof binary === 'string' && binary.trim() && binary !== 'git' && binary !== 'git.exe';
   const unsafe = hasCustomBinary ? { allowUnsafeCustomBinary: true } : undefined;
   if (!directory) {
-    return simpleGit({ env, spawnOptions, binary, unsafe });
+    return createSimpleGit({ env, spawnOptions, binary, unsafe });
   }
-  return simpleGit({
+  return createSimpleGit({
     baseDir: normalizeDirectoryPath(directory),
     env,
     spawnOptions,
