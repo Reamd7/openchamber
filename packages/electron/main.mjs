@@ -1919,12 +1919,16 @@ const findWindowsExecutable = (appId) => {
   return null;
 };
 
+const findWindowsAppNameExecutable = (appName) => {
+  const program = `${String(appName || '').trim()}.exe`.replace(/\s+/g, '');
+  return program === '.exe' ? null : runWhere(program);
+};
+
 const isWindowsAppInstalled = ({ appId, appName }) => {
   if (appId === 'finder') return true;
   if (appId === 'terminal') return Boolean(findWindowsExecutable('terminal'));
   if (findWindowsExecutable(appId)) return true;
-  const program = `${appName}.exe`.replace(/\s+/g, '');
-  return Boolean(runWhere(program));
+  return Boolean(findWindowsAppNameExecutable(appName));
 };
 
 const buildWindowsInstalledApps = (apps) => {
@@ -1936,15 +1940,21 @@ const buildWindowsInstalledApps = (apps) => {
     .map((name) => ({ name, iconDataUrl: null }));
 };
 
-const buildWindowsOpenProjectSpecs = ({ projectPath, appId }) => {
+const buildWindowsOpenProjectSpecs = ({ projectPath, appId, appName }) => {
   if (appId === 'finder') {
     return [{ program: 'explorer.exe', args: [projectPath] }];
   }
   if (appId === 'terminal') {
-    return [
-      { program: 'wt.exe', args: ['-d', projectPath] },
-      { program: 'powershell.exe', args: ['-NoExit', '-Command', `Set-Location -LiteralPath ${JSON.stringify(projectPath)}`] },
-    ];
+    const specs = [];
+    const terminal = findWindowsExecutable('terminal');
+    if (terminal) {
+      specs.push({ program: terminal, args: ['-d', projectPath] });
+    }
+    const shell = runWhere('pwsh.exe') || runWhere('powershell.exe');
+    if (shell) {
+      specs.push({ program: shell, args: ['-NoExit', '-Command', `Set-Location -LiteralPath ${JSON.stringify(projectPath)}`] });
+    }
+    return specs;
   }
   const specs = [];
   const cli = WINDOWS_CLI_BY_APP_ID[appId];
@@ -1958,15 +1968,19 @@ const buildWindowsOpenProjectSpecs = ({ projectPath, appId }) => {
   if (exe) {
     specs.push({ program: exe, args: [projectPath] });
   }
+  const namedExe = findWindowsAppNameExecutable(appName);
+  if (namedExe && !specs.some((spec) => spec.program === namedExe)) {
+    specs.push({ program: namedExe, args: [projectPath] });
+  }
   return specs;
 };
 
-const buildWindowsOpenFileSpecs = ({ filePath, appId }) => {
+const buildWindowsOpenFileSpecs = ({ filePath, appId, appName }) => {
   if (appId === 'finder') {
     return [{ program: 'explorer.exe', args: ['/select,', filePath] }];
   }
   if (appId === 'terminal') {
-    return buildWindowsOpenProjectSpecs({ projectPath: path.dirname(filePath), appId });
+    return buildWindowsOpenProjectSpecs({ projectPath: path.dirname(filePath), appId, appName });
   }
   const specs = [];
   const cli = WINDOWS_CLI_BY_APP_ID[appId];
@@ -1979,6 +1993,10 @@ const buildWindowsOpenFileSpecs = ({ filePath, appId }) => {
   const exe = findWindowsExecutable(appId);
   if (exe) {
     specs.push({ program: exe, args: [filePath] });
+  }
+  const namedExe = findWindowsAppNameExecutable(appName);
+  if (namedExe && !specs.some((spec) => spec.program === namedExe)) {
+    specs.push({ program: namedExe, args: [filePath] });
   }
   return specs;
 };
@@ -2030,22 +2048,64 @@ const buildOpenFileSpecs = ({ filePath, appId, appName }) => {
 
 const quoteWindowsCommandArg = (value) => `"${String(value).replace(/"/g, '""')}"`;
 
-const runWindowsCommandScript = (spec) => {
-  const commandLine = ['call', quoteWindowsCommandArg(spec.program), ...spec.args.map(quoteWindowsCommandArg)].join(' ');
-  return spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', commandLine], {
+const resolveWindowsLaunchProgram = (program) => {
+  if (path.isAbsolute(program)) {
+    return fs.existsSync(program) ? program : null;
+  }
+  return runWhere(program);
+};
+
+const launchWindowsCommandScript = (spec, program) => {
+  const commandLine = ['call', quoteWindowsCommandArg(program), ...spec.args.map(quoteWindowsCommandArg)].join(' ');
+  const child = spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', commandLine], {
+    detached: true,
     stdio: 'ignore',
-    windowsHide: true,
+    windowsHide: false,
     windowsVerbatimArguments: true,
   });
+  child.unref();
+};
+
+const launchWindowsSpec = (spec) => {
+  const program = resolveWindowsLaunchProgram(spec.program);
+  if (!program) {
+    throw new Error('program not found');
+  }
+
+  if (/\.(cmd|bat)$/i.test(program)) {
+    launchWindowsCommandScript(spec, program);
+    return;
+  }
+
+  const child = spawn(program, spec.args, {
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: false,
+  });
+  child.unref();
 };
 
 const runSpecChain = (specs, appName) => {
+  if (!Array.isArray(specs) || specs.length === 0) {
+    throw new Error(`Failed to open in ${appName}: no launch candidates`);
+  }
+
+  if (process.platform === 'win32') {
+    const failures = [];
+    for (const spec of specs) {
+      try {
+        launchWindowsSpec(spec);
+        return;
+      } catch (error) {
+        failures.push(`${spec.program}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    throw new Error(`Failed to open in ${appName}: ${failures.join('; ')}`);
+  }
+
   const failures = [];
   for (const spec of specs) {
-    const isWindowsCommandScript = process.platform === 'win32' && /\.(cmd|bat)$/i.test(spec.program);
-    const result = isWindowsCommandScript
-      ? runWindowsCommandScript(spec)
-      : spawnSync(spec.program, spec.args, { stdio: 'ignore', windowsHide: true });
+    const result = spawnSync(spec.program, spec.args, { stdio: 'ignore', windowsHide: true });
     if (result.error) {
       failures.push(`${spec.program}: ${result.error.message}`);
       continue;
