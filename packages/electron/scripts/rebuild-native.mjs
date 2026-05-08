@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import path from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import fsp from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -121,6 +121,24 @@ const ensureWindowsNodeAddonApiForNodePty = async (rebuildRootPath) => {
   };
 };
 
+const patchNodePtySpectreMitigation = () => {
+  if (process.platform !== 'win32') return () => {};
+  const gypPath = path.join(repoRoot, 'node_modules', 'node-pty', 'binding.gyp');
+  if (!existsSync(gypPath)) return () => {};
+  try {
+    const original = readFileSync(gypPath, 'utf8');
+    const patched = original.replace("'SpectreMitigation': 'Spectre'", "'SpectreMitigation': 'false'");
+    if (patched === original) return () => {};
+    writeFileSync(gypPath, patched);
+    console.log('[electron] patched node-pty binding.gyp to disable Spectre mitigation');
+    return () => {
+      try { writeFileSync(gypPath, original); } catch {}
+    };
+  } catch {
+    return () => {};
+  }
+};
+
 console.log(`[electron] rebuilding native modules against Electron ${electronVersion}...`);
 
 // Rebuild against the hoisted root node_modules (bun workspace layout).
@@ -128,6 +146,7 @@ console.log(`[electron] rebuilding native modules against Electron ${electronVer
 // bypassed by @electron/rebuild in favor of direct node-gyp builds.
 const rebuildPath = createWindowsRebuildPath(repoRoot);
 let cleanupNodeAddonApi = async () => {};
+const revertSpectrePatch = patchNodePtySpectreMitigation();
 try {
   cleanupNodeAddonApi = await ensureWindowsNodeAddonApiForNodePty(rebuildPath.buildPath);
   await rebuild({
@@ -138,6 +157,7 @@ try {
     onlyModules: ['better-sqlite3', 'node-pty', 'bun-pty'],
   });
 } finally {
+  try { revertSpectrePatch(); } catch {}
   try {
     await cleanupNodeAddonApi();
   } finally {

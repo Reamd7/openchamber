@@ -2,7 +2,7 @@ import React from 'react';
 import { cn } from '@/lib/utils';
 import { useUIStore } from '@/stores/useUIStore';
 import { useI18n } from '@/lib/i18n';
-import { isDesktopShell, isVSCodeRuntime, startDesktopWindowDrag } from '@/lib/desktop';
+import { isDesktopShell, isVSCodeRuntime, isWindowsElectronDesktop, startDesktopWindowDrag } from '@/lib/desktop';
 import { useTabletStandalonePwaRuntime } from '@/lib/device';
 
 export const RIGHT_SIDEBAR_CONTENT_WIDTH = 420;
@@ -23,12 +23,7 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({ isOpen, children, cl
   const isDesktopApp = React.useMemo(() => isDesktopShell(), []);
   const isVSCode = React.useMemo(() => isVSCodeRuntime(), []);
   const isTabletStandalonePwa = useTabletStandalonePwaRuntime();
-  const isWindowsElectronDesktop = React.useMemo(() => {
-    if (typeof window === 'undefined') {
-      return false;
-    }
-    return Boolean(window.__OPENCHAMBER_ELECTRON__) && window.__OPENCHAMBER_PLATFORM__ === 'win32';
-  }, []);
+  const isWindowsDesktop = React.useMemo(() => isWindowsElectronDesktop(), []);
   const [isResizing, setIsResizing] = React.useState(false);
   const startXRef = React.useRef(0);
   const startWidthRef = React.useRef(rightSidebarWidth || 420);
@@ -138,7 +133,7 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({ isOpen, children, cl
   }, [isDesktopApp]);
 
   const webWindowControlsOverlayStyle = React.useMemo<React.CSSProperties | undefined>(() => {
-    if ((isDesktopApp && !isWindowsElectronDesktop) || isVSCode) {
+    if ((isDesktopApp && !isWindowsDesktop) || isVSCode) {
       return undefined;
     }
 
@@ -147,7 +142,7 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({ isOpen, children, cl
       paddingRight: 'calc(0.75rem + var(--oc-wco-right-inset, 0px))',
       ...(isTabletStandalonePwa ? { paddingTop: 'var(--oc-safe-area-top, 0px)' } : null),
     };
-  }, [isDesktopApp, isTabletStandalonePwa, isVSCode, isWindowsElectronDesktop]);
+  }, [isDesktopApp, isTabletStandalonePwa, isVSCode, isWindowsDesktop]);
 
   return (
     <aside

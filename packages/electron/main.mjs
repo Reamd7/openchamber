@@ -1886,6 +1886,13 @@ const WINDOWS_APP_EXECUTABLES = {
   zed: ['zed.exe'],
   'visual-studio': ['devenv.exe'],
   'sublime-text': ['subl.exe', 'sublime_text.exe'],
+  pycharm: ['pycharm.cmd', 'pycharm64.exe'],
+  intellij: ['idea.cmd', 'idea64.exe'],
+  webstorm: ['webstorm.cmd', 'webstorm64.exe'],
+  phpstorm: ['phpstorm.cmd', 'phpstorm64.exe'],
+  rider: ['rider.cmd', 'rider64.exe'],
+  rustrover: ['rustrover.cmd', 'rustrover64.exe'],
+  'android-studio': ['studio.cmd', 'studio64.exe'],
 };
 
 const WINDOWS_APP_ID_BY_NAME = new Map([
@@ -1900,6 +1907,13 @@ const WINDOWS_APP_ID_BY_NAME = new Map([
   ['zed', 'zed'],
   ['visual studio', 'visual-studio'],
   ['sublime text', 'sublime-text'],
+  ['pycharm', 'pycharm'],
+  ['intellij idea', 'intellij'],
+  ['webstorm', 'webstorm'],
+  ['phpstorm', 'phpstorm'],
+  ['rider', 'rider'],
+  ['rustrover', 'rustrover'],
+  ['android studio', 'android-studio'],
 ]);
 
 const getWindowsAppIdForName = (appName) => WINDOWS_APP_ID_BY_NAME.get(String(appName || '').trim().toLowerCase()) || '';
@@ -1941,19 +1955,19 @@ const buildWindowsInstalledApps = (apps) => {
 };
 
 const buildWindowsOpenProjectSpecs = ({ projectPath, appId, appName }) => {
-  if (appId === 'finder') {
-    return [{ program: 'explorer.exe', args: [projectPath] }];
-  }
   if (appId === 'terminal') {
     const specs = [];
     const terminal = findWindowsExecutable('terminal');
     if (terminal) {
       specs.push({ program: terminal, args: ['-d', projectPath] });
     }
-    const shell = runWhere('pwsh.exe') || runWhere('powershell.exe');
-    if (shell) {
-      specs.push({ program: shell, args: ['-NoExit', '-Command', `Set-Location -LiteralPath ${JSON.stringify(projectPath)}`] });
+    const pwsh = runWhere('pwsh.exe');
+    if (pwsh) {
+      specs.push({ program: pwsh, args: ['-NoExit', '-Command', `Set-Location -LiteralPath '${projectPath.replace(/'/g, "''")}'`] });
     }
+    // powershell.exe and cmd.exe are always present on Windows.
+    specs.push({ program: 'powershell.exe', args: ['-NoExit', '-Command', `Set-Location -LiteralPath '${projectPath.replace(/'/g, "''")}'`] });
+    specs.push({ program: process.env.ComSpec || 'cmd.exe', args: ['/k', `cd /d "${projectPath}"`] });
     return specs;
   }
   const specs = [];
@@ -1976,9 +1990,6 @@ const buildWindowsOpenProjectSpecs = ({ projectPath, appId, appName }) => {
 };
 
 const buildWindowsOpenFileSpecs = ({ filePath, appId, appName }) => {
-  if (appId === 'finder') {
-    return [{ program: 'explorer.exe', args: ['/select,', filePath] }];
-  }
   if (appId === 'terminal') {
     return buildWindowsOpenProjectSpecs({ projectPath: path.dirname(filePath), appId, appName });
   }
@@ -2066,6 +2077,15 @@ const launchWindowsCommandScript = (spec, program) => {
   child.unref();
 };
 
+const isWindowsAppAlias = (resolvedPath) => {
+  try {
+    const stat = fs.lstatSync(resolvedPath);
+    return stat.isSymbolicLink() || (stat.size === 0 && resolvedPath.toLowerCase().includes('windowsapps'));
+  } catch {
+    return false;
+  }
+};
+
 const launchWindowsSpec = (spec) => {
   const program = resolveWindowsLaunchProgram(spec.program);
   if (!program) {
@@ -2074,6 +2094,20 @@ const launchWindowsSpec = (spec) => {
 
   if (/\.(cmd|bat)$/i.test(program)) {
     launchWindowsCommandScript(spec, program);
+    return;
+  }
+
+  // UWP app execution aliases (0-byte reparse points under WindowsApps)
+  // cannot be spawned directly with detached:true. Route through cmd /c start.
+  if (isWindowsAppAlias(program)) {
+    const args = spec.args.map(quoteWindowsCommandArg).join(' ');
+    const child = spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `start "" ${quoteWindowsCommandArg(program)} ${args}`], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+      windowsVerbatimArguments: true,
+    });
+    child.unref();
     return;
   }
 
@@ -2091,16 +2125,17 @@ const runSpecChain = (specs, appName) => {
   }
 
   if (process.platform === 'win32') {
-    const failures = [];
+    // launchWindowsSpec uses async spawn (fire-and-forget), so it won't throw
+    // on launch failure. Pick the first spec whose program actually resolves,
+    // rather than relying on catch to fall through to the next candidate.
     for (const spec of specs) {
-      try {
+      const resolved = resolveWindowsLaunchProgram(spec.program);
+      if (resolved) {
         launchWindowsSpec(spec);
         return;
-      } catch (error) {
-        failures.push(`${spec.program}: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
-    throw new Error(`Failed to open in ${appName}: ${failures.join('; ')}`);
+    throw new Error(`Failed to open in ${appName}: no resolvable candidates`);
   }
 
   const failures = [];
@@ -2302,6 +2337,10 @@ const handleInvoke = async (browserWindow, command, args = {}) => {
         throw new Error('Project path, app id, and app name are required');
       }
       if (process.platform === 'win32') {
+        if (appId === 'finder') {
+          await shell.openPath(projectPath);
+          return null;
+        }
         runSpecChain(buildWindowsOpenProjectSpecs({ projectPath, appId, appName }), appName);
         return null;
       }
@@ -2320,6 +2359,10 @@ const handleInvoke = async (browserWindow, command, args = {}) => {
         throw new Error('File path, app id, and app name are required');
       }
       if (process.platform === 'win32') {
+        if (appId === 'finder') {
+          shell.showItemInFolder(filePath);
+          return null;
+        }
         runSpecChain(buildWindowsOpenFileSpecs({ filePath, appId, appName }), appName);
         return null;
       }

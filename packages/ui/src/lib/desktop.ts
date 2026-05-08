@@ -215,6 +215,11 @@ export const invokeDesktop = async <T = unknown>(command: string, args?: Record<
   return tauri.core.invoke(command, args ?? {}) as Promise<T>;
 };
 
+export const isWindowsElectronDesktop = (): boolean => {
+  if (typeof window === 'undefined') return false;
+  return isElectronShell() && (window as unknown as { __OPENCHAMBER_PLATFORM__?: string }).__OPENCHAMBER_PLATFORM__ === 'win32';
+};
+
 const normalizeOrigin = (raw: string): string | null => {
   const trimmed = raw.trim();
   if (!trimmed) return null;
